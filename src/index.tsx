@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, render, useApp } from "ink";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { spawn } from "node:child_process";
 import { Header } from "./components/Header.js";
 import { History } from "./components/History.js";
 import { InputArea } from "./components/InputArea.js";
-import { runCommand } from "./command.js";
+import { findTool, getToolDescriptions } from "./tools/index.js";
+import type { ToolResult } from "./tools/types.js";
 import { ui } from "./constants.js";
 import type { Message, MessageRole } from "./types.js";
 
@@ -18,122 +18,74 @@ function createMessage(role: MessageRole, text: string): Message {
   return { id: messageId, role, text };
 }
 
-type GitExecResult = {
-  ok: boolean;
-  text: string;
-};
-
-function runGit(args: string[]): Promise<GitExecResult> {
-  return new Promise((resolve) => {
-    const child = spawn("git", args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", (error) => {
-      resolve({ ok: false, text: String(error) });
-    });
-
-    child.on("close", (code) => {
-      const text = `${stdout}\n${stderr}`.trim();
-      resolve({ ok: code === 0, text });
-    });
-  });
-}
-
 function App() {
   const { exit } = useApp();
   const [input, setInput] = useState("");
   const [farewell, setFarewell] = useState<string | null>(null);
   const [history, setHistory] = useState<Message[]>([]);
-  const [awaitingCommitMessage, setAwaitingCommitMessage] = useState(false);
-  const [runningGit, setRunningGit] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const pendingRef = useRef<((input: string) => Promise<ToolResult>) | null>(null);
 
   const push = (role: MessageRole, text: string) => {
     setHistory((prev) => [...prev, createMessage(role, text)]);
   };
 
-  const clearHistory = () => {
-    setHistory([]);
+  const pushAll = (messages: string[]) => {
+    setHistory((prev) => [
+      ...prev,
+      ...messages.map((text) => createMessage("assistant", text)),
+    ]);
   };
 
   const leave = useCallback(() => {
     setFarewell((prev) => prev ?? ui.bye);
   }, []);
 
-  const onCommand = async (command: string) => {
-    if (runningGit) {
-      push("assistant", "git 命令执行中，请稍候...");
-      return;
-    }
+  const handleToolResult = (result: ToolResult) => {
+    pushAll(result.messages);
+    pendingRef.current = result.waitInput?.handle ?? null;
+  };
 
-    const result = runCommand(command);
-    if (result.type === "none") {
-      return;
-    }
+  const onCommand = async (command: string) => {
+    if (!command || busy) return;
+
     push("user", command);
 
-    if (awaitingCommitMessage) {
-      setRunningGit(true);
-      setAwaitingCommitMessage(false);
-
-      push("assistant", "正在执行: git commit ...");
-      const commitResult = await runGit(["commit", "-m", command]);
-      if (!commitResult.ok) {
-        push("assistant", `commit 失败:\n${commitResult.text || "未知错误"}`);
-        setRunningGit(false);
-        return;
-      }
-
-      push("assistant", "正在执行: git push");
-      let pushResult = await runGit(["push"]);
-      if (!pushResult.ok && pushResult.text.includes("no upstream branch")) {
-        push("assistant", "检测到无 upstream，正在执行: git push -u origin HEAD");
-        pushResult = await runGit(["push", "-u", "origin", "HEAD"]);
-      }
-
-      if (pushResult.ok) {
-        push("assistant", `push 完成\n${pushResult.text}`);
-      } else {
-        push("assistant", `push 失败:\n${pushResult.text || "未知错误"}`);
-      }
-      setRunningGit(false);
+    if (pendingRef.current) {
+      const handle = pendingRef.current;
+      pendingRef.current = null;
+      setBusy(true);
+      const result = await handle(command);
+      handleToolResult(result);
+      setBusy(false);
       return;
     }
 
-    if (result.type === "clear") {
-      clearHistory();
+    if (command === "help") {
+      push("assistant", `可用命令: help, ${getToolDescriptions()}, clear, exit`);
       return;
     }
-    if (result.type === "exit") {
+
+    if (command === "clear") {
+      setHistory([]);
+      return;
+    }
+
+    if (command === "exit" || command === "quit") {
       leave();
       return;
     }
-    if (result.type === "git_push_flow_start") {
-      setRunningGit(true);
-      push("assistant", "正在执行: git add .");
-      const addResult = await runGit(["add", "."]);
-      if (!addResult.ok) {
-        push("assistant", `git add 失败:\n${addResult.text || "未知错误"}`);
-        setRunningGit(false);
-        return;
-      }
 
-      setAwaitingCommitMessage(true);
-      push("assistant", "已暂存改动，请输入 commit message 并回车。");
-      setRunningGit(false);
+    const tool = findTool(command);
+    if (tool) {
+      setBusy(true);
+      const result = await tool.run(command);
+      handleToolResult(result);
+      setBusy(false);
       return;
     }
-    if (result.type === "reply") {
-      push("assistant", result.text);
-    }
+
+    push("assistant", `未知命令: ${command}`);
   };
 
   useEffect(() => {
@@ -147,9 +99,7 @@ function App() {
   }, [leave]);
 
   useEffect(() => {
-    if (!farewell) {
-      return;
-    }
+    if (!farewell) return;
     const t = setTimeout(() => exit(), 80);
     return () => clearTimeout(t);
   }, [farewell, exit]);
@@ -185,66 +135,51 @@ async function runFallback() {
     terminal: false,
     crlfDelay: Infinity,
   });
-  let awaitingCommitMessage = false;
+  type PendingFn = (input: string) => Promise<ToolResult>;
+  let pending: PendingFn | null = null;
 
   for await (const raw of rl) {
     const command = raw.trim();
-    const result = runCommand(command);
+    if (!command) continue;
 
-    if (result.type === "none") {
-      continue;
-    }
-
-    if (awaitingCommitMessage) {
-      awaitingCommitMessage = false;
-
-      output.write("正在执行: git commit ...\n");
-      const commitResult = await runGit(["commit", "-m", command]);
-      if (!commitResult.ok) {
-        output.write(`commit 失败:\n${commitResult.text || "未知错误"}\n`);
-        continue;
-      }
-
-      output.write("正在执行: git push\n");
-      let pushResult = await runGit(["push"]);
-      if (!pushResult.ok && pushResult.text.includes("no upstream branch")) {
-        output.write("检测到无 upstream，正在执行: git push -u origin HEAD\n");
-        pushResult = await runGit(["push", "-u", "origin", "HEAD"]);
-      }
-      if (pushResult.ok) {
-        output.write(`push 完成\n${pushResult.text}\n`);
-      } else {
-        output.write(`push 失败:\n${pushResult.text || "未知错误"}\n`);
+    if (pending) {
+      const handle: PendingFn = pending;
+      pending = null;
+      const result: ToolResult = await handle(command);
+      result.messages.forEach((m: string) => output.write(`${m}\n`));
+      if (result.waitInput) {
+        pending = result.waitInput.handle;
       }
       continue;
     }
 
-    if (result.type === "clear") {
+    if (command === "help") {
+      output.write(`可用命令: help, ${getToolDescriptions()}, clear, exit\n`);
+      continue;
+    }
+
+    if (command === "clear") {
       output.write(`\x1Bc\n${ui.headerTitle}\n${ui.headerModel}\n${ui.headerPath}\n\n${ui.tip}\n\n`);
       continue;
     }
 
-    if (result.type === "exit") {
+    if (command === "exit" || command === "quit") {
       output.write(`${ui.bye} 👋\n`);
       rl.close();
       return;
     }
 
-    if (result.type === "git_push_flow_start") {
-      output.write("正在执行: git add .\n");
-      const addResult = await runGit(["add", "."]);
-      if (!addResult.ok) {
-        output.write(`git add 失败:\n${addResult.text || "未知错误"}\n`);
-        continue;
+    const tool = findTool(command);
+    if (tool) {
+      const result = await tool.run(command);
+      result.messages.forEach((m) => output.write(`${m}\n`));
+      if (result.waitInput) {
+        pending = result.waitInput.handle;
       }
-      awaitingCommitMessage = true;
-      output.write("已暂存改动，请输入 commit message 并回车。\n");
       continue;
     }
 
-    if (result.type === "reply") {
-      output.write(`${result.text}\n`);
-    }
+    output.write(`未知命令: ${command}\n`);
   }
   rl.close();
 }
