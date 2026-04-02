@@ -19,9 +19,10 @@
  * - 适配器（Adapter）：同一套命令处理逻辑适配 TTY（React/Ink）和非 TTY（readline）两种运行环境
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Text, render, useApp } from "ink";
+import { Box, render, useApp } from "ink";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { ClosingSummary } from "./components/ClosingSummary.js";
 import { Header } from "./components/Header.js";
 import { History } from "./components/History.js";
 import { InputArea } from "./components/InputArea.js";
@@ -46,6 +47,8 @@ function App() {
   const connectionRef = useRef(new MockApiConnection());
   const [input, setInput] = useState("");
   const [farewell, setFarewell] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [toolCalls, setToolCalls] = useState<Record<string, number>>({});
   const [history, setHistory] = useState<Message[]>([]);
   const [busy, setBusy] = useState(false);
 
@@ -115,6 +118,7 @@ function App() {
         if (cancelled) break;
 
         if (evt.event === "connected") {
+          setConversationId(evt.data.conversationId);
           push("system", `conversation_id: ${evt.data.conversationId}`);
           continue;
         }
@@ -125,6 +129,10 @@ function App() {
         }
 
         if (evt.event === "tool_call") {
+          setToolCalls((prev) => ({
+            ...prev,
+            [evt.data.tool]: (prev[evt.data.tool] ?? 0) + 1,
+          }));
           push("assistant", `[api][${evt.data.requestId.slice(0, 8)}] 调用工具: ${evt.data.tool}`);
           continue;
         }
@@ -149,20 +157,21 @@ function App() {
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Header />
-      <History history={history} hasFarewell={Boolean(farewell)} />
-
       {farewell ? (
-        <Text color="green">{farewell} 👋</Text>
+        <ClosingSummary farewell={farewell} conversationId={conversationId} toolCalls={toolCalls} />
       ) : (
-        <InputArea
-          value={input}
-          onChange={setInput}
-          onSubmit={(value) => {
-            setInput("");
-            void onCommand(value.trim());
-          }}
-        />
+        <>
+          <Header />
+          <History history={history} hasFarewell={Boolean(farewell)} />
+          <InputArea
+            value={input}
+            onChange={setInput}
+            onSubmit={(value) => {
+              setInput("");
+              void onCommand(value.trim());
+            }}
+          />
+        </>
       )}
     </Box>
   );
