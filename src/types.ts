@@ -11,4 +11,4 @@ export type CommandResult =
   | { type: "reply"; text: string }
   | { type: "clear" }
   | { type: "exit" }
-  | { type: "push" };
+  | { type: "git_push_flow_start" };

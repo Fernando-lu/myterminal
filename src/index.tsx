@@ -3,12 +3,12 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Box, Text, render, useApp } from "ink";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { spawn } from "node:child_process";
 import { Header } from "./components/Header.js";
 import { History } from "./components/History.js";
 import { InputArea } from "./components/InputArea.js";
 import { runCommand } from "./command.js";
 import { ui } from "./constants.js";
-import { gitAddAll, gitCommitAndPush } from "./git.js";
 import type { Message, MessageRole } from "./types.js";
 
 let messageId = 0;
@@ -18,13 +18,43 @@ function createMessage(role: MessageRole, text: string): Message {
   return { id: messageId, role, text };
 }
 
+type GitExecResult = {
+  ok: boolean;
+  text: string;
+};
+
+function runGit(args: string[]): Promise<GitExecResult> {
+  return new Promise((resolve) => {
+    const child = spawn("git", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      resolve({ ok: false, text: String(error) });
+    });
+
+    child.on("close", (code) => {
+      const text = `${stdout}\n${stderr}`.trim();
+      resolve({ ok: code === 0, text });
+    });
+  });
+}
+
 function App() {
   const { exit } = useApp();
   const [input, setInput] = useState("");
   const [farewell, setFarewell] = useState<string | null>(null);
   const [history, setHistory] = useState<Message[]>([]);
-  const [waitingCommitMessage, setWaitingCommitMessage] = useState(false);
-  const [isRunning, setIsRunning] = useState(false);
+  const [awaitingCommitMessage, setAwaitingCommitMessage] = useState(false);
+  const [runningGit, setRunningGit] = useState(false);
 
   const push = (role: MessageRole, text: string) => {
     setHistory((prev) => [...prev, createMessage(role, text)]);
@@ -39,29 +69,8 @@ function App() {
   }, []);
 
   const onCommand = async (command: string) => {
-    if (isRunning) {
-      return;
-    }
-    if (waitingCommitMessage) {
-      if (!command) {
-        push("assistant", "commit message 不能为空，请重新输入。");
-        return;
-      }
-      if (command === "cancel") {
-        push("user", command);
-        push("assistant", "已取消 push 流程。");
-        setWaitingCommitMessage(false);
-        return;
-      }
-      push("user", command);
-      setIsRunning(true);
-      const result = await gitCommitAndPush(command);
-      push("assistant", result.ok ? "已完成 commit + push。" : "push 失败。");
-      if (result.text) {
-        push("assistant", result.text);
-      }
-      setWaitingCommitMessage(false);
-      setIsRunning(false);
+    if (runningGit) {
+      push("assistant", "git 命令执行中，请稍候...");
       return;
     }
 
@@ -70,6 +79,35 @@ function App() {
       return;
     }
     push("user", command);
+
+    if (awaitingCommitMessage) {
+      setRunningGit(true);
+      setAwaitingCommitMessage(false);
+
+      push("assistant", "正在执行: git commit ...");
+      const commitResult = await runGit(["commit", "-m", command]);
+      if (!commitResult.ok) {
+        push("assistant", `commit 失败:\n${commitResult.text || "未知错误"}`);
+        setRunningGit(false);
+        return;
+      }
+
+      push("assistant", "正在执行: git push");
+      let pushResult = await runGit(["push"]);
+      if (!pushResult.ok && pushResult.text.includes("no upstream branch")) {
+        push("assistant", "检测到无 upstream，正在执行: git push -u origin HEAD");
+        pushResult = await runGit(["push", "-u", "origin", "HEAD"]);
+      }
+
+      if (pushResult.ok) {
+        push("assistant", `push 完成\n${pushResult.text}`);
+      } else {
+        push("assistant", `push 失败:\n${pushResult.text || "未知错误"}`);
+      }
+      setRunningGit(false);
+      return;
+    }
+
     if (result.type === "clear") {
       clearHistory();
       return;
@@ -78,23 +116,23 @@ function App() {
       leave();
       return;
     }
-    if (result.type === "reply") {
-      push("assistant", result.text);
-    }
-    if (result.type === "push") {
-      setIsRunning(true);
-      const added = await gitAddAll();
-      if (!added.ok) {
-        push("assistant", "git add 失败。");
-        if (added.stderr || added.stdout) {
-          push("assistant", added.stderr || added.stdout);
-        }
-        setIsRunning(false);
+    if (result.type === "git_push_flow_start") {
+      setRunningGit(true);
+      push("assistant", "正在执行: git add .");
+      const addResult = await runGit(["add", "."]);
+      if (!addResult.ok) {
+        push("assistant", `git add 失败:\n${addResult.text || "未知错误"}`);
+        setRunningGit(false);
         return;
       }
-      push("assistant", "已执行 git add . ，请输入 commit message（输入 cancel 可取消）。");
-      setWaitingCommitMessage(true);
-      setIsRunning(false);
+
+      setAwaitingCommitMessage(true);
+      push("assistant", "已暂存改动，请输入 commit message 并回车。");
+      setRunningGit(false);
+      return;
+    }
+    if (result.type === "reply") {
+      push("assistant", result.text);
     }
   };
 
@@ -147,35 +185,37 @@ async function runFallback() {
     terminal: false,
     crlfDelay: Infinity,
   });
-  let waitingCommitMessage = false;
+  let awaitingCommitMessage = false;
 
   for await (const raw of rl) {
     const command = raw.trim();
-    if (waitingCommitMessage) {
-      if (!command) {
-        output.write("commit message 不能为空，请重新输入。\n");
-        continue;
-      }
-      if (command === "cancel") {
-        output.write("已取消 push 流程。\n");
-        waitingCommitMessage = false;
-        continue;
-      }
-      const done = await gitCommitAndPush(command);
-      if (done.ok) {
-        output.write("已完成 commit + push。\n");
-      } else {
-        output.write("push 失败。\n");
-      }
-      if (done.text) {
-        output.write(`${done.text}\n`);
-      }
-      waitingCommitMessage = false;
-      continue;
-    }
     const result = runCommand(command);
 
     if (result.type === "none") {
+      continue;
+    }
+
+    if (awaitingCommitMessage) {
+      awaitingCommitMessage = false;
+
+      output.write("正在执行: git commit ...\n");
+      const commitResult = await runGit(["commit", "-m", command]);
+      if (!commitResult.ok) {
+        output.write(`commit 失败:\n${commitResult.text || "未知错误"}\n`);
+        continue;
+      }
+
+      output.write("正在执行: git push\n");
+      let pushResult = await runGit(["push"]);
+      if (!pushResult.ok && pushResult.text.includes("no upstream branch")) {
+        output.write("检测到无 upstream，正在执行: git push -u origin HEAD\n");
+        pushResult = await runGit(["push", "-u", "origin", "HEAD"]);
+      }
+      if (pushResult.ok) {
+        output.write(`push 完成\n${pushResult.text}\n`);
+      } else {
+        output.write(`push 失败:\n${pushResult.text || "未知错误"}\n`);
+      }
       continue;
     }
 
@@ -190,20 +230,20 @@ async function runFallback() {
       return;
     }
 
-    if (result.type === "reply") {
-      output.write(`${result.text}\n`);
-    }
-    if (result.type === "push") {
-      const added = await gitAddAll();
-      if (!added.ok) {
-        output.write("git add 失败。\n");
-        if (added.stderr || added.stdout) {
-          output.write(`${added.stderr || added.stdout}\n`);
-        }
+    if (result.type === "git_push_flow_start") {
+      output.write("正在执行: git add .\n");
+      const addResult = await runGit(["add", "."]);
+      if (!addResult.ok) {
+        output.write(`git add 失败:\n${addResult.text || "未知错误"}\n`);
         continue;
       }
-      output.write("已执行 git add . ，请输入 commit message（输入 cancel 可取消）。\n");
-      waitingCommitMessage = true;
+      awaitingCommitMessage = true;
+      output.write("已暂存改动，请输入 commit message 并回车。\n");
+      continue;
+    }
+
+    if (result.type === "reply") {
+      output.write(`${result.text}\n`);
     }
   }
   rl.close();
