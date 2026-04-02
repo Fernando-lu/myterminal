@@ -25,9 +25,8 @@ import { stdin as input, stdout as output } from "node:process";
 import { Header } from "./components/Header.js";
 import { History } from "./components/History.js";
 import { InputArea } from "./components/InputArea.js";
-import { streamMockApi } from "./mock-api/client.js";
-import { getToolDescriptions, runToolByName } from "./tools/index.js";
-import type { ToolResult } from "./tools/types.js";
+import { MockApiConnection } from "./mock-api/client.js";
+import { getToolDescriptions } from "./tools/index.js";
 import { ui } from "./constants.js";
 import type { Message, MessageRole } from "./types.js";
 
@@ -44,80 +43,30 @@ function createMessage(role: MessageRole, text: string): Message {
  */
 function App() {
   const { exit } = useApp();
+  const connectionRef = useRef(new MockApiConnection());
   const [input, setInput] = useState("");
   const [farewell, setFarewell] = useState<string | null>(null);
   const [history, setHistory] = useState<Message[]>([]);
   const [busy, setBusy] = useState(false);
-  /** 续问句柄：如果上一个工具返回了 waitInput，下次输入会直接调用这个 handle */
-  const pendingRef = useRef<((input: string) => Promise<ToolResult>) | null>(null);
 
   const push = (role: MessageRole, text: string) => {
     setHistory((prev) => [...prev, createMessage(role, text)]);
-  };
-
-  const pushAll = (messages: string[]) => {
-    setHistory((prev) => [
-      ...prev,
-      ...messages.map((text) => createMessage("assistant", text)),
-    ]);
   };
 
   const leave = useCallback(() => {
     setFarewell((prev) => prev ?? ui.bye);
   }, []);
 
-  /** 统一处理工具返回值：输出消息 + 存储续问句柄 */
-  const handleToolResult = (result: ToolResult) => {
-    pushAll(result.messages);
-    pendingRef.current = result.waitInput?.handle ?? null;
-  };
-
-  const handleMockApi = async (command: string) => {
-    for await (const evt of streamMockApi(command)) {
-      if (evt.event === "status") {
-        push("assistant", `[api] ${evt.data.text}`);
-        continue;
-      }
-
-      if (evt.event === "message") {
-        push("assistant", evt.data.text);
-        continue;
-      }
-
-      if (evt.event === "tool_call") {
-        push("assistant", `[api] 调用工具: ${evt.data.tool}`);
-        const result = await runToolByName(evt.data.tool, evt.data.payload ?? {});
-        handleToolResult(result);
-        continue;
-      }
-
-      if (evt.event === "done" && evt.data.text) {
-        push("assistant", `[api] ${evt.data.text}`);
-      }
-    }
-  };
-
   /**
    * 命令处理主流程（职责链）
-   * 优先级：pending 续问 → 内置命令 → 注册工具 → 系统命令兜底
+   * 优先级：内置命令 -> POST 到 mock API（结果全部从长连接回流）
    */
   const onCommand = async (command: string) => {
     if (!command || busy) return;
 
     push("user", command);
 
-    // 1. 续问模式：上一个工具要求继续输入
-    if (pendingRef.current) {
-      const handle = pendingRef.current;
-      pendingRef.current = null;
-      setBusy(true);
-      const result = await handle(command);
-      handleToolResult(result);
-      setBusy(false);
-      return;
-    }
-
-    // 2. 内置命令（不走工具系统）
+    // 内置命令
     if (command === "help") {
       push("assistant", `可用命令: help, ${getToolDescriptions()}, clear, exit`);
       return;
@@ -133,9 +82,9 @@ function App() {
       return;
     }
 
-    // 3. 走 mock API 全流程（事件流 -> 工具分发）
+    // 非内置命令：统一 POST 到服务端会话；实际结果通过长连接事件回流
     setBusy(true);
-    await handleMockApi(command);
+    await connectionRef.current.postMessage(command);
     setBusy(false);
   };
 
@@ -156,6 +105,47 @@ function App() {
     const t = setTimeout(() => exit(), 80);
     return () => clearTimeout(t);
   }, [farewell, exit]);
+
+  /** 生命周期：启动时建立一次长连接并持续消费事件 */
+  useEffect(() => {
+    let cancelled = false;
+
+    const consume = async () => {
+      for await (const evt of connectionRef.current.openStream()) {
+        if (cancelled) break;
+
+        if (evt.event === "connected") {
+          push("system", `conversation_id: ${evt.data.conversationId}`);
+          continue;
+        }
+
+        if (evt.event === "status") {
+          push("assistant", `[api][${evt.data.requestId.slice(0, 8)}] ${evt.data.text}`);
+          continue;
+        }
+
+        if (evt.event === "tool_call") {
+          push("assistant", `[api][${evt.data.requestId.slice(0, 8)}] 调用工具: ${evt.data.tool}`);
+          continue;
+        }
+
+        if (evt.event === "message") {
+          push("assistant", evt.data.text);
+          continue;
+        }
+
+        if (evt.event === "done") {
+          push("assistant", `[api][${evt.data.requestId.slice(0, 8)}] 流程结束。`);
+        }
+      }
+    };
+
+    void consume();
+    return () => {
+      cancelled = true;
+      connectionRef.current.close();
+    };
+  }, []);
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -183,6 +173,7 @@ function App() {
  * 逻辑与 App 组件一致，但用 readline 读取输入、直接 write 输出
  */
 async function runFallback() {
+  const connection = new MockApiConnection();
   output.write(
     `\n${ui.headerTitle}\n${ui.headerModel}\n${ui.headerPath}\n\n${ui.tip}\n\n`,
   );
@@ -192,52 +183,36 @@ async function runFallback() {
     terminal: false,
     crlfDelay: Infinity,
   });
-  type PendingFn = (input: string) => Promise<ToolResult>;
-  let pending: PendingFn | null = null;
-
-  const handleToolResult = (result: ToolResult) => {
-    result.messages.forEach((m: string) => output.write(`${m}\n`));
-    if (result.waitInput) {
-      pending = result.waitInput.handle;
-    }
-  };
-
-  const handleMockApi = async (command: string) => {
-    for await (const evt of streamMockApi(command)) {
+  const pendingOutputs: string[] = [];
+  const consumeEvents = async () => {
+    for await (const evt of connection.openStream()) {
+      if (evt.event === "connected") {
+        output.write(`conversation_id: ${evt.data.conversationId}\n`);
+        continue;
+      }
       if (evt.event === "status") {
-        output.write(`[api] ${evt.data.text}\n`);
+        output.write(`[api][${evt.data.requestId.slice(0, 8)}] ${evt.data.text}\n`);
+        continue;
+      }
+      if (evt.event === "tool_call") {
+        output.write(`[api][${evt.data.requestId.slice(0, 8)}] 调用工具: ${evt.data.tool}\n`);
         continue;
       }
       if (evt.event === "message") {
         output.write(`${evt.data.text}\n`);
         continue;
       }
-      if (evt.event === "tool_call") {
-        output.write(`[api] 调用工具: ${evt.data.tool}\n`);
-        const result = await runToolByName(evt.data.tool, evt.data.payload ?? {});
-        handleToolResult(result);
-        continue;
-      }
-      if (evt.event === "done" && evt.data.text) {
-        output.write(`[api] ${evt.data.text}\n`);
+      if (evt.event === "done") {
+        pendingOutputs[pendingOutputs.length] = evt.data.requestId;
+        output.write(`[api][${evt.data.requestId.slice(0, 8)}] 流程结束。\n`);
       }
     }
   };
+  void consumeEvents();
 
   for await (const raw of rl) {
     const command = raw.trim();
     if (!command) continue;
-
-    if (pending) {
-      const handle: PendingFn = pending;
-      pending = null;
-      const result: ToolResult = await handle(command);
-      result.messages.forEach((m: string) => output.write(`${m}\n`));
-      if (result.waitInput) {
-        pending = result.waitInput.handle;
-      }
-      continue;
-    }
 
     if (command === "help") {
       output.write(`可用命令: help, ${getToolDescriptions()}, clear, exit\n`);
@@ -251,12 +226,14 @@ async function runFallback() {
 
     if (command === "exit" || command === "quit") {
       output.write(`${ui.bye} 👋\n`);
+      connection.close();
       rl.close();
       return;
     }
 
-    await handleMockApi(command);
+    await connection.postMessage(command);
   }
+  connection.close();
   rl.close();
 }
 

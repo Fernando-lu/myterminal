@@ -9,11 +9,10 @@
  * 2. 在此文件 import 并加入 tools 数组
  * 3. 主入口无需修改（开闭原则：对扩展开放，对修改关闭）
  */
-import type { Tool } from "./types.js";
+import type { Tool, ToolResult } from "./types.js";
 import { gitPushTool } from "./git-push.js";
 import { newFileTool, deleteFileTool, editFileTool } from "./fs-tools.js";
 import { execCommand } from "../shell.js";
-import type { ToolResult } from "./types.js";
 
 const tools: Tool[] = [newFileTool, deleteFileTool, editFileTool, gitPushTool];
 

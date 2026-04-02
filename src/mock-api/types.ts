@@ -1,11 +1,15 @@
+export type ToolName = "newFile" | "deleteFile" | "editFile" | "push" | "shell";
+
 export type ApiEvent =
-  | { event: "status"; data: { text: string } }
-  | { event: "message"; data: { text: string } }
+  | { event: "connected"; data: { conversationId: string } }
+  | { event: "status"; data: { requestId: string; text: string } }
+  | { event: "message"; data: { requestId: string; text: string } }
   | {
       event: "tool_call";
       data: {
-        tool: "newFile" | "deleteFile" | "editFile" | "push" | "shell";
+        requestId: string;
+        tool: ToolName;
         payload?: Record<string, string | undefined>;
       };
     }
-  | { event: "done"; data: { text?: string } };
+  | { event: "done"; data: { requestId: string } };
