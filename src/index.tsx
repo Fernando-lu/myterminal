@@ -25,8 +25,8 @@ import { stdin as input, stdout as output } from "node:process";
 import { Header } from "./components/Header.js";
 import { History } from "./components/History.js";
 import { InputArea } from "./components/InputArea.js";
-import { execCommand } from "./shell.js";
-import { findTool, getToolDescriptions } from "./tools/index.js";
+import { streamMockApi } from "./mock-api/client.js";
+import { getToolDescriptions, runToolByName } from "./tools/index.js";
 import type { ToolResult } from "./tools/types.js";
 import { ui } from "./constants.js";
 import type { Message, MessageRole } from "./types.js";
@@ -72,6 +72,31 @@ function App() {
     pendingRef.current = result.waitInput?.handle ?? null;
   };
 
+  const handleMockApi = async (command: string) => {
+    for await (const evt of streamMockApi(command)) {
+      if (evt.event === "status") {
+        push("assistant", `[api] ${evt.data.text}`);
+        continue;
+      }
+
+      if (evt.event === "message") {
+        push("assistant", evt.data.text);
+        continue;
+      }
+
+      if (evt.event === "tool_call") {
+        push("assistant", `[api] 调用工具: ${evt.data.tool}`);
+        const result = await runToolByName(evt.data.tool, evt.data.payload ?? {});
+        handleToolResult(result);
+        continue;
+      }
+
+      if (evt.event === "done" && evt.data.text) {
+        push("assistant", `[api] ${evt.data.text}`);
+      }
+    }
+  };
+
   /**
    * 命令处理主流程（职责链）
    * 优先级：pending 续问 → 内置命令 → 注册工具 → 系统命令兜底
@@ -108,21 +133,9 @@ function App() {
       return;
     }
 
-    // 3. 匹配注册工具
-    const tool = findTool(command);
-    if (tool) {
-      setBusy(true);
-      const result = await tool.run(command);
-      handleToolResult(result);
-      setBusy(false);
-      return;
-    }
-
-    // 4. 兜底：当作系统命令直接执行
+    // 3. 走 mock API 全流程（事件流 -> 工具分发）
     setBusy(true);
-    const shellResult = await execCommand(command);
-    const out = shellResult.stdout || shellResult.stderr || "(无输出)";
-    push("assistant", out);
+    await handleMockApi(command);
     setBusy(false);
   };
 
@@ -182,6 +195,35 @@ async function runFallback() {
   type PendingFn = (input: string) => Promise<ToolResult>;
   let pending: PendingFn | null = null;
 
+  const handleToolResult = (result: ToolResult) => {
+    result.messages.forEach((m: string) => output.write(`${m}\n`));
+    if (result.waitInput) {
+      pending = result.waitInput.handle;
+    }
+  };
+
+  const handleMockApi = async (command: string) => {
+    for await (const evt of streamMockApi(command)) {
+      if (evt.event === "status") {
+        output.write(`[api] ${evt.data.text}\n`);
+        continue;
+      }
+      if (evt.event === "message") {
+        output.write(`${evt.data.text}\n`);
+        continue;
+      }
+      if (evt.event === "tool_call") {
+        output.write(`[api] 调用工具: ${evt.data.tool}\n`);
+        const result = await runToolByName(evt.data.tool, evt.data.payload ?? {});
+        handleToolResult(result);
+        continue;
+      }
+      if (evt.event === "done" && evt.data.text) {
+        output.write(`[api] ${evt.data.text}\n`);
+      }
+    }
+  };
+
   for await (const raw of rl) {
     const command = raw.trim();
     if (!command) continue;
@@ -213,19 +255,7 @@ async function runFallback() {
       return;
     }
 
-    const tool = findTool(command);
-    if (tool) {
-      const result = await tool.run(command);
-      result.messages.forEach((m) => output.write(`${m}\n`));
-      if (result.waitInput) {
-        pending = result.waitInput.handle;
-      }
-      continue;
-    }
-
-    const shellResult = await execCommand(command);
-    const out = shellResult.stdout || shellResult.stderr || "(无输出)";
-    output.write(`${out}\n`);
+    await handleMockApi(command);
   }
   rl.close();
 }
