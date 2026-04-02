@@ -11,8 +11,9 @@
  */
 import type { Tool } from "./types.js";
 import { gitPushTool } from "./git-push.js";
+import { newFileTool, deleteFileTool, editFileTool } from "./fs-tools.js";
 
-const tools: Tool[] = [gitPushTool];
+const tools: Tool[] = [newFileTool, deleteFileTool, editFileTool, gitPushTool];
 
 /** 根据用户输入查找匹配的工具 */
 export function findTool(input: string): Tool | undefined {

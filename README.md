@@ -9,6 +9,7 @@
 - 内置命令：`help`、`push代码`、`clear`、`exit`
 - 其他输入默认按系统命令执行（例如：`echo hello`、`pwd`、`git status`）
 - `push代码` 流程：`git add .` -> 输入 commit message -> `git commit` -> `git push`
+- 文件工具（路径相对当前工作目录，禁止 `..` 越界）：`新建 <路径>`、`删除 <路径>`、`编辑 <路径>` 或 `编辑 <路径> | <全文>`（`|` 后为单行替换内容；仅 `编辑 path` 时会提示再输入一行）
 - 退出生命周期处理（`exit` / `Ctrl + C` 告别语）
 - 非 TTY 场景兜底运行
 
