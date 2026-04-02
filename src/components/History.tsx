@@ -1,3 +1,13 @@
+/**
+ * 历史消息列表组件
+ *
+ * 渲染所有对话消息，按角色区分颜色：
+ * - user（cyan）：用户输入，前面带提示符
+ * - assistant（green）：工具/命令回复
+ * - system（gray）：系统提示
+ *
+ * 使用 message.id 作为 React key，保证列表渲染稳定性。
+ */
 import React from "react";
 import { Box, Text } from "ink";
 import type { Message, MessageRole } from "../types.js";

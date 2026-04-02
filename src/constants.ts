@@ -1,3 +1,9 @@
+/**
+ * 全局 UI 常量
+ *
+ * 集中管理所有文案和样式字符，便于统一修改和国际化。
+ * 只放被多个模块共享的常量，组件私有的数据（如 logoLines）放在组件内部。
+ */
 export const prompt = "❯";
 
 export const ui = {

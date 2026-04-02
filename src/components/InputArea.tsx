@@ -1,3 +1,10 @@
+/**
+ * 输入区域组件
+ *
+ * 上下各一条分隔线，中间是带提示符的文本输入框。
+ * 使用 ink-text-input 组件处理键盘事件（backspace、光标等），
+ * 不需要手动管理按键，组件内部已封装。
+ */
 import React from "react";
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";

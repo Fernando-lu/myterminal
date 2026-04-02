@@ -1,3 +1,11 @@
+/**
+ * 欢迎页头部组件
+ *
+ * 布局参考 Qwen Code / Claude Code 风格：
+ * 左侧 ASCII Logo + 右侧信息卡 + Tips + 分隔线 + 快捷键提示
+ *
+ * logoLines 只在此组件使用，遵循就近原则（Colocation），不放全局常量。
+ */
 import React from "react";
 import { Box, Text } from "ink";
 import { ui } from "../constants.js";
