@@ -13,6 +13,5 @@ export const ui = {
   tip: "Tips: 运行 myterminal --continue 或 myterminal --resume 可继续之前会话。",
   shortcut: "按 ? 查看快捷键",
   placeholder: "输入您的消息或 @ 文件路径",
-  bye: "下次再见，祝你编码顺利",
   divider: "──────────────────────────────────────────────────────────────",
 };

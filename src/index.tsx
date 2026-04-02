@@ -19,7 +19,7 @@
  * - 适配器（Adapter）：同一套命令处理逻辑适配 TTY（React/Ink）和非 TTY（readline）两种运行环境
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Box, render, useApp } from "ink";
+import { Box, Text, render, useApp, useInput } from "ink";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { ClosingSummary } from "./components/ClosingSummary.js";
@@ -46,7 +46,8 @@ function App() {
   const { exit } = useApp();
   const connectionRef = useRef(new MockApiConnection());
   const [input, setInput] = useState("");
-  const [farewell, setFarewell] = useState<string | null>(null);
+  const [isClosing, setIsClosing] = useState(false);
+  const [exitHintArmed, setExitHintArmed] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [toolCalls, setToolCalls] = useState<Record<string, number>>({});
   const [history, setHistory] = useState<Message[]>([]);
@@ -57,14 +58,38 @@ function App() {
   };
 
   const leave = useCallback(() => {
-    setFarewell((prev) => prev ?? ui.bye);
+    setExitHintArmed(false);
+    setIsClosing(true);
+    connectionRef.current.close();
   }, []);
+
+  useInput((value, key) => {
+    if (!key.ctrl || value !== "c") {
+      return;
+    }
+
+    if (isClosing) {
+      exit();
+      return;
+    }
+
+    if (exitHintArmed) {
+      leave();
+      return;
+    }
+
+    setExitHintArmed(true);
+  });
 
   /**
    * 命令处理主流程（职责链）
    * 优先级：内置命令 -> POST 到 mock API（结果全部从长连接回流）
    */
   const onCommand = async (command: string) => {
+    if (command) {
+      setExitHintArmed(false);
+    }
+
     if (!command || busy) return;
 
     push("user", command);
@@ -91,6 +116,11 @@ function App() {
     setBusy(false);
   };
 
+  useEffect(() => {
+    if (!isClosing) return;
+    exit()
+  }, [isClosing, exit]);
+
   /** 生命周期：信号退出 */
   useEffect(() => {
     const onSignal = () => leave();
@@ -101,13 +131,6 @@ function App() {
       process.off("SIGTERM", onSignal);
     };
   }, [leave]);
-
-  /** 生命周期：告别语显示后延迟退出 */
-  useEffect(() => {
-    if (!farewell) return;
-    const t = setTimeout(() => exit(), 80);
-    return () => clearTimeout(t);
-  }, [farewell, exit]);
 
   /** 生命周期：启动时建立一次长连接并持续消费事件 */
   useEffect(() => {
@@ -157,12 +180,12 @@ function App() {
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      {farewell ? (
-        <ClosingSummary farewell={farewell} conversationId={conversationId} toolCalls={toolCalls} />
+      {isClosing ? (
+        <ClosingSummary conversationId={conversationId} toolCalls={toolCalls} />
       ) : (
         <>
           <Header />
-          <History history={history} hasFarewell={Boolean(farewell)} />
+          <History history={history} hasFarewell={isClosing} />
           <InputArea
             value={input}
             onChange={setInput}
@@ -171,6 +194,7 @@ function App() {
               void onCommand(value.trim());
             }}
           />
+          {exitHintArmed ? <Text color="yellow">再按一次 Ctrl+C 将退出并显示统计页面</Text> : null}
         </>
       )}
     </Box>
@@ -234,7 +258,6 @@ async function runFallback() {
     }
 
     if (command === "exit" || command === "quit") {
-      output.write(`${ui.bye} 👋\n`);
       connection.close();
       rl.close();
       return;
@@ -253,7 +276,7 @@ async function runFallback() {
  * - 非 TTY：readline 逐行读取（管道/脚本）
  */
 if (process.stdin.isTTY && process.stdout.isTTY) {
-  render(<App />);
+  render(<App />, { exitOnCtrlC: false });
 } else {
   try {
     await runFallback();
