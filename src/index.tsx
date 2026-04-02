@@ -6,6 +6,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { Header } from "./components/Header.js";
 import { History } from "./components/History.js";
 import { InputArea } from "./components/InputArea.js";
+import { execCommand } from "./shell.js";
 import { findTool, getToolDescriptions } from "./tools/index.js";
 import type { ToolResult } from "./tools/types.js";
 import { ui } from "./constants.js";
@@ -85,7 +86,11 @@ function App() {
       return;
     }
 
-    push("assistant", `未知命令: ${command}`);
+    setBusy(true);
+    const shellResult = await execCommand(command);
+    const out = shellResult.stdout || shellResult.stderr || "(无输出)";
+    push("assistant", out);
+    setBusy(false);
   };
 
   useEffect(() => {
@@ -179,7 +184,9 @@ async function runFallback() {
       continue;
     }
 
-    output.write(`未知命令: ${command}\n`);
+    const shellResult = await execCommand(command);
+    const out = shellResult.stdout || shellResult.stderr || "(无输出)";
+    output.write(`${out}\n`);
   }
   rl.close();
 }

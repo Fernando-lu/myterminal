@@ -6,7 +6,8 @@
 
 - 终端欢迎页（Logo、信息卡、Tips、输入区样式）
 - 命令输入与回显（支持工具注册模式）
-- 内置命令：`help`、`echo <text>`、`push代码`、`clear`、`exit`
+- 内置命令：`help`、`push代码`、`clear`、`exit`
+- 其他输入默认按系统命令执行（例如：`echo hello`、`pwd`、`git status`）
 - `push代码` 流程：`git add .` -> 输入 commit message -> `git commit` -> `git push`
 - 退出生命周期处理（`exit` / `Ctrl + C` 告别语）
 - 非 TTY 场景兜底运行
