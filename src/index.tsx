@@ -8,6 +8,7 @@ import { History } from "./components/History.js";
 import { InputArea } from "./components/InputArea.js";
 import { runCommand } from "./command.js";
 import { ui } from "./constants.js";
+import { gitAddAll, gitCommitAndPush } from "./git.js";
 import type { Message, MessageRole } from "./types.js";
 
 let messageId = 0;
@@ -22,6 +23,8 @@ function App() {
   const [input, setInput] = useState("");
   const [farewell, setFarewell] = useState<string | null>(null);
   const [history, setHistory] = useState<Message[]>([]);
+  const [waitingCommitMessage, setWaitingCommitMessage] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
 
   const push = (role: MessageRole, text: string) => {
     setHistory((prev) => [...prev, createMessage(role, text)]);
@@ -35,7 +38,33 @@ function App() {
     setFarewell((prev) => prev ?? ui.bye);
   }, []);
 
-  const onCommand = (command: string) => {
+  const onCommand = async (command: string) => {
+    if (isRunning) {
+      return;
+    }
+    if (waitingCommitMessage) {
+      if (!command) {
+        push("assistant", "commit message 不能为空，请重新输入。");
+        return;
+      }
+      if (command === "cancel") {
+        push("user", command);
+        push("assistant", "已取消 push 流程。");
+        setWaitingCommitMessage(false);
+        return;
+      }
+      push("user", command);
+      setIsRunning(true);
+      const result = await gitCommitAndPush(command);
+      push("assistant", result.ok ? "已完成 commit + push。" : "push 失败。");
+      if (result.text) {
+        push("assistant", result.text);
+      }
+      setWaitingCommitMessage(false);
+      setIsRunning(false);
+      return;
+    }
+
     const result = runCommand(command);
     if (result.type === "none") {
       return;
@@ -51,6 +80,21 @@ function App() {
     }
     if (result.type === "reply") {
       push("assistant", result.text);
+    }
+    if (result.type === "push") {
+      setIsRunning(true);
+      const added = await gitAddAll();
+      if (!added.ok) {
+        push("assistant", "git add 失败。");
+        if (added.stderr || added.stdout) {
+          push("assistant", added.stderr || added.stdout);
+        }
+        setIsRunning(false);
+        return;
+      }
+      push("assistant", "已执行 git add . ，请输入 commit message（输入 cancel 可取消）。");
+      setWaitingCommitMessage(true);
+      setIsRunning(false);
     }
   };
 
@@ -85,7 +129,7 @@ function App() {
           onChange={setInput}
           onSubmit={(value) => {
             setInput("");
-            onCommand(value.trim());
+            void onCommand(value.trim());
           }}
         />
       )}
@@ -103,9 +147,32 @@ async function runFallback() {
     terminal: false,
     crlfDelay: Infinity,
   });
+  let waitingCommitMessage = false;
 
   for await (const raw of rl) {
     const command = raw.trim();
+    if (waitingCommitMessage) {
+      if (!command) {
+        output.write("commit message 不能为空，请重新输入。\n");
+        continue;
+      }
+      if (command === "cancel") {
+        output.write("已取消 push 流程。\n");
+        waitingCommitMessage = false;
+        continue;
+      }
+      const done = await gitCommitAndPush(command);
+      if (done.ok) {
+        output.write("已完成 commit + push。\n");
+      } else {
+        output.write("push 失败。\n");
+      }
+      if (done.text) {
+        output.write(`${done.text}\n`);
+      }
+      waitingCommitMessage = false;
+      continue;
+    }
     const result = runCommand(command);
 
     if (result.type === "none") {
@@ -125,6 +192,18 @@ async function runFallback() {
 
     if (result.type === "reply") {
       output.write(`${result.text}\n`);
+    }
+    if (result.type === "push") {
+      const added = await gitAddAll();
+      if (!added.ok) {
+        output.write("git add 失败。\n");
+        if (added.stderr || added.stdout) {
+          output.write(`${added.stderr || added.stdout}\n`);
+        }
+        continue;
+      }
+      output.write("已执行 git add . ，请输入 commit message（输入 cancel 可取消）。\n");
+      waitingCommitMessage = true;
     }
   }
   rl.close();

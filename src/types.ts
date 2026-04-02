@@ -10,4 +10,5 @@ export type CommandResult =
   | { type: "none" }
   | { type: "reply"; text: string }
   | { type: "clear" }
-  | { type: "exit" };
+  | { type: "exit" }
+  | { type: "push" };
